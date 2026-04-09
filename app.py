@@ -4,11 +4,10 @@ import os
 from dotenv import load_dotenv
 load_dotenv()##loads name-value from .env into the os environment
 ##this entire file defines our API we create that connects to the model
-MODEL_NAME = os.getenv("MODEL_NAME")##get env
-##get port environment variable from operating system
-PORT = int(os.getenv("PORT"),"5000")
-## threshold constant we use to classify toxic vs non-toxic based off toxic score
-THRESHOLD = float(os.getenv("THRESHOLD"))
+# Read configuration from environment variables
+MODEL_NAME = os.getenv("MODEL_NAME", "unitary/toxic-bert")
+THRESHOLD = float(os.getenv("THRESHOLD", "0.1"))
+PORT = int(os.getenv("PORT", "5000"))
 FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
 HF_TOKEN = os.getenv("HF_TOKEN")
 
