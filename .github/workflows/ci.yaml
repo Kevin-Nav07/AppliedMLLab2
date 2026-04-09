@@ -51,4 +51,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: kevinnav07/toxic-model-service:lab2
+          tags: kevinnav07/toxic-model-service:latest
