@@ -31,17 +31,25 @@ image_transform = transforms.Compose([
 
 
 def create_model():
-    model = deeplabv3_resnet50(weights=None, weights_backbone=None)
-    model.classifier[4] = nn.Conv2d(256, 1, kernel_size=1)
-    return model
+    segmentation_model = deeplabv3_resnet50(weights=None, weights_backbone=None)
+    segmentation_model.classifier[4] = nn.Conv2d(256, 1, kernel_size=1)
+    return segmentation_model
 
 
 def get_model():
     global model
+
     if model is None:
-        model = create_model().to(DEVICE)
-        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
-        model.eval()
+        if not CHECKPOINT_PATH.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {CHECKPOINT_PATH}")
+
+        temp_model = create_model().to(DEVICE)
+        state_dict = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+        temp_model.load_state_dict(state_dict)
+        temp_model.eval()
+
+        model = temp_model
+
     return model
 
 
@@ -71,15 +79,23 @@ def predict():
     except Exception:
         return jsonify({"error": "Invalid image file."}), 400
 
+    try:
+        segmentation_model = get_model()
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        return jsonify({"error": f"Model loading failed: {str(e)}"}), 500
+
     original_size = image.size
     input_tensor = image_transform(image).unsqueeze(0).to(DEVICE)
 
-    segmentation_model = get_model()
-
-    with torch.no_grad():
-        logits = segmentation_model(input_tensor)["out"]
-        probs = torch.sigmoid(logits)
-        pred_mask = (probs > 0.5).float().cpu().numpy()[0, 0]
+    try:
+        with torch.no_grad():
+            logits = segmentation_model(input_tensor)["out"]
+            probs = torch.sigmoid(logits)
+            pred_mask = (probs > 0.5).float().cpu().numpy()[0, 0]
+    except Exception as e:
+        return jsonify({"error": f"Inference failed: {str(e)}"}), 500
 
     output_dir = Path("outputs/predictions")
     output_dir.mkdir(parents=True, exist_ok=True)
