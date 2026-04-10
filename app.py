@@ -44,7 +44,7 @@ def get_model():
             raise FileNotFoundError(f"Checkpoint not found: {CHECKPOINT_PATH}")
 
         temp_model = create_model().to(DEVICE)
-        state_dict = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+        state_dict = torch.load(CHECKPOINT_PATH, map_location=DEVICE, weights_only=False)
         temp_model.load_state_dict(state_dict)
         temp_model.eval()
 
