@@ -2,3 +2,10 @@ venv/
 .venv/
 __pycache__/
 .env
+
+data/raw/
+data/masks/
+data/processed/
+models/checkpoints/
+outputs/figures/
+outputs/metrics/

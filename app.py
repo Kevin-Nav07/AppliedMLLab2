@@ -1,86 +1,126 @@
-from flask import Flask, request, jsonify
-from transformers import pipeline
+import io
 import os
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+import torch
+from torch import nn
+from flask import Flask, request, jsonify
+from torchvision import transforms
+from torchvision.models.segmentation import deeplabv3_resnet50
 from dotenv import load_dotenv
-load_dotenv()##loads name-value from .env into the os environment
-##this entire file defines our API we create that connects to the model
-# Read configuration from environment variables
-MODEL_NAME = os.getenv("MODEL_NAME", "unitary/toxic-bert")
-THRESHOLD = float(os.getenv("THRESHOLD", "0.1"))
+
+load_dotenv()
+
+IMAGE_SIZE = (256, 256)
 PORT = int(os.getenv("PORT", "5000"))
 FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
-HF_TOKEN = os.getenv("HF_TOKEN")
+CHECKPOINT_PATH = Path(os.getenv("CHECKPOINT_PATH", "models/checkpoints/best_deeplabv3_building.pt"))
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-##this line crates the flask application
 app = Flask(__name__)
 
-## Load the model ONCE at startup (fast requests later)
-##once start up we load the model once instead of at eveyr API request
-clf = None
+model = None
 
-def get_classifier():##lazy loading model
-    global clf##consideronly the global variable
-
-    if clf is None:##if no model is loaded, load the model
-        clf = pipeline("text-classification",
-            model=MODEL_NAME,
-            token=HF_TOKEN if HF_TOKEN else None)
-    return clf
+image_transform = transforms.Compose([
+    transforms.Resize(IMAGE_SIZE),
+    transforms.ToTensor(),
+])
 
 
-@app.get("/health")##a get API endpoint for our api
+def create_model():
+    model = deeplabv3_resnet50(weights=None, weights_backbone=None)
+    model.classifier[4] = nn.Conv2d(256, 1, kernel_size=1)
+    return model
+
+
+def get_model():
+    global model
+    if model is None:
+        model = create_model().to(DEVICE)
+        model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
+        model.eval()
+    return model
+
+
+@app.get("/health")
 def health():
-    """
-    Simple health check endpoint.
-    Why: lets you quickly confirm the server is running.
-    """
-    return jsonify({"server response": "ok",
-                    "threshold":THRESHOLD,
-                    "model_name": MODEL_NAME})
-
-
-@app.post("/predict")## post request endpoint for predicting a text
-def predict():
-    """
-    REST endpoint that:
-    - Reads JSON input: {"text": "..."}
-    - Runs the model
-    - Returns JSON output
-    """
-
-    ##Safely parse JSON (silent=True prevents Flask from throwing an HTML error page)
-    data = request.get_json(silent=True)
-    ##If body is empty or not JSON, data becomes None. We'll normalize to dict.
-    if data is None:
-        data = {}
-    
-    ##use the get method to retrieve the "text" attribute's value in the json
-    text = data.get("text")
-
-    ##Validate the input
-    if not isinstance(text, str) or not text.strip():
-        return jsonify({
-            "error": "Invalid request. Send JSON like: {\"text\": \"your text here\"}"
-        }), 400
-    
-        
-
-    #running inference if the data is fine
-    # pipeline returns a list of predictions; for a single input, take index 0
-    classifier = get_classifier()
-    raw = classifier(text)[0] 
-    ##retrieve the score of toxicity because that is what we care about
-    toxic_score = float(raw["score"])
-
-    ##now conver the toxicity score to our binary decision of toxic or not
-    label = "toxic" if toxic_score >= THRESHOLD else "non-toxic"
-
-    ## Return a clean JSON response with our new custom threshold
     return jsonify({
-        "label": label,
-        "toxic_score": toxic_score,
-        "threshold": THRESHOLD,
-        "model_name":MODEL_NAME
+        "status": "ok",
+        "task": "house-segmentation",
+        "device": DEVICE,
+        "checkpoint_exists": CHECKPOINT_PATH.exists(),
+        "checkpoint_path": str(CHECKPOINT_PATH)
+    })
+
+
+@app.post("/predict")
+def predict():
+    if "image" not in request.files:
+        return jsonify({"error": "Send a file field named 'image'."}), 400
+
+    file = request.files["image"]
+
+    if file.filename == "":
+        return jsonify({"error": "No file selected."}), 400
+
+    try:
+        image = Image.open(io.BytesIO(file.read())).convert("RGB")
+    except Exception:
+        return jsonify({"error": "Invalid image file."}), 400
+
+    original_size = image.size
+    input_tensor = image_transform(image).unsqueeze(0).to(DEVICE)
+
+    segmentation_model = get_model()
+
+    with torch.no_grad():
+        logits = segmentation_model(input_tensor)["out"]
+        probs = torch.sigmoid(logits)
+        pred_mask = (probs > 0.5).float().cpu().numpy()[0, 0]
+
+    output_dir = Path("outputs/predictions")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    base_name = Path(file.filename).stem
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    mask_image = (pred_mask * 255).astype(np.uint8)
+    mask_pil = Image.fromarray(mask_image, mode="L")
+    mask_filename = f"{base_name}_pred_mask_{timestamp}.png"
+    mask_path = output_dir / mask_filename
+    mask_pil.save(mask_path)
+
+    resized_image = image.resize((pred_mask.shape[1], pred_mask.shape[0])).convert("RGB")
+    image_array = np.array(resized_image).copy()
+
+    overlay = image_array.copy()
+    overlay[pred_mask > 0.5] = [255, 0, 0]
+
+    blended = (0.6 * image_array + 0.4 * overlay).astype(np.uint8)
+    overlay_pil = Image.fromarray(blended)
+
+    overlay_filename = f"{base_name}_overlay_{timestamp}.png"
+    overlay_path = output_dir / overlay_filename
+    overlay_pil.save(overlay_path)
+
+    house_pixels = int(pred_mask.sum())
+    total_pixels = int(pred_mask.size)
+    house_ratio = house_pixels / total_pixels
+
+    return jsonify({
+        "message": "Segmentation completed",
+        "original_width": original_size[0],
+        "original_height": original_size[1],
+        "mask_width": int(pred_mask.shape[1]),
+        "mask_height": int(pred_mask.shape[0]),
+        "house_pixels": house_pixels,
+        "total_pixels": total_pixels,
+        "house_ratio": house_ratio,
+        "saved_mask_path": str(mask_path),
+        "saved_overlay_path": str(overlay_path)
     })
 
 
